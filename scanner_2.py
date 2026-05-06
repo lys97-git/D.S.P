@@ -42,6 +42,31 @@ API_TIMEOUT = 30
 CLEANUP_IMAGE_FILE = os.environ.get("CLEANUP_IMAGE_FILE", "true").lower() == "true"
 # 환경 변수로 이미지 파일 삭제 여부를 제어합니다.
 
+# ──────────────────────────────────────────────
+# DB 스키마 정합성을 위한 상수
+# ──────────────────────────────────────────────
+# scan_jobs.severity / *_filtered.severity CHECK 제약이 허용하는 5개 표준값입니다.
+ALLOWED_SEVERITIES = {"CRITICAL", "HIGH", "MEDIUM", "LOW", "UNKNOWN"}
+
+
+def normalize_severity(sev) -> str:
+    """
+    도구별로 다양한 심각도 값을 DB CHECK 제약이 허용하는 5개 표준값으로 정규화합니다.
+    예) None / "" / "Negligible" / "negligible" → "UNKNOWN"
+    """
+    if not sev:
+        # None 또는 빈 문자열이면
+        return "UNKNOWN"
+        # UNKNOWN 으로 처리합니다.
+    s = str(sev).strip().upper()
+    # 문자열로 변환 후 공백 제거 및 대문자화합니다.
+    if s in ALLOWED_SEVERITIES:
+        # 표준값에 해당하면
+        return s
+        # 그대로 반환합니다.
+    return "UNKNOWN"
+    # 그 외(Negligible 등 비표준)는 UNKNOWN 으로 매핑합니다.
+
 
 # ──────────────────────────────────────────────
 # 유틸리티: 안전한 파일 경로 생성
@@ -350,10 +375,11 @@ async def custom_scan_endpoint(
     files_to_cleanup = [image_path]
     # 이미지 파일을 정리 대상으로 지정합니다.
 
+    # DB CHECK 제약(scan_jobs.trivy_status / grype_status)이 허용하는 값으로 초기화합니다.
     trivy_status = "pending"
-    # Trivy 스캔 상태를 초기화합니다.
+    # Trivy 스캔 상태를 초기화합니다. (DB CHECK: pending/running/completed/failed/skipped)
     grype_status = "pending"
-    # Grype 스캔 상태를 초기화합니다.
+    # Grype 스캔 상태를 초기화합니다. (DB CHECK: pending/running/completed/failed/skipped)
     started_at   = datetime.now(timezone.utc).isoformat()
     # 스캔 시작 시각을 ISO 형식으로 기록합니다.
 
@@ -398,8 +424,8 @@ async def custom_scan_endpoint(
             # Grype 실행이 성공하고 출력이 있으면
             grype_raw    = json.loads(grype_res.stdout)
             # JSON 문자열을 파이썬 딕셔너리로 파싱합니다.
-            grype_status = "success"
-            # Grype 상태를 성공으로 업데이트합니다.
+            grype_status = "completed"
+            # Grype 상태를 완료로 업데이트합니다. (DB CHECK 제약: completed)
             with open(grype_raw_file, "w", encoding="utf-8") as f:
                 # Grype 결과를 JSON 파일로 저장합니다.
                 json.dump(grype_raw, f)
@@ -434,8 +460,8 @@ async def custom_scan_endpoint(
             # Trivy 실행이 성공하고 출력이 있으면
             trivy_raw    = json.loads(trivy_res.stdout)
             # JSON 문자열을 파이썬 딕셔너리로 파싱합니다.
-            trivy_status = "success"
-            # Trivy 상태를 성공으로 업데이트합니다.
+            trivy_status = "completed"
+            # Trivy 상태를 완료로 업데이트합니다. (DB CHECK 제약: completed)
             with open(trivy_raw_file, "w", encoding="utf-8") as f:
                 # Trivy 결과를 JSON 파일로 저장합니다.
                 json.dump(trivy_raw, f)
@@ -477,11 +503,11 @@ async def custom_scan_endpoint(
         # 전체 고유 취약점 = grype + trivy 합집합 (mismatch / common 모두 포함)
         all_vuln_ids = set()
         for v in filtered_data.get("grype_vulnerabilities", []):
-            vid = v.get("vulnerabilityid")
+            vid = v.get("vulnerability_id")
             if vid:
                 all_vuln_ids.add(vid)
         for v in filtered_data.get("trivy_vulnerabilities", []):
-            vid = v.get("vulnerabilityid")
+            vid = v.get("vulnerability_id")
             if vid:
                 all_vuln_ids.add(vid)
         # 전체 고유 취약점 ID 집합을 만듭니다.
@@ -491,6 +517,15 @@ async def custom_scan_endpoint(
                 severity_counts[cat].get(sev_key, 0)
                 for cat in severity_counts
             )
+
+        # 전체 스캔 status 결정 (DB CHECK: pending/uploaded/running/completed/failed/cancelled)
+        # 하나라도 failed 면 failed, 둘 다 completed 면 completed
+        if grype_status == "failed" and trivy_status == "failed":
+            overall_status = "failed"
+        elif grype_status == "completed" or trivy_status == "completed":
+            overall_status = "completed"
+        else:
+            overall_status = "failed"
 
         final_payload = {
             # 최종 응답 payload를 구성합니다.
@@ -502,15 +537,16 @@ async def custom_scan_endpoint(
                 # 스캔 이름입니다.
                 "file_name":             file.filename,
                 # 원본 업로드 파일명입니다. (scan_jobs.file_name)
+                "file_type":             "image_tar",
+                # 파일 유형입니다. (scan_jobs.file_type, NOT NULL, CHECK: image_tar/dockerfile/sbom)
                 "image_name":            file.filename,
-                # 이미지 이름입니다. (scan_jobs.image_name, image_tag 대신 수정)
-                "status":                "success",
-                # 전체 스캔 상태입니다.
-                # syft_status 컬럼은 scan_jobs 스키마에 없으므로 제거
+                # 이미지 이름입니다. (scan_jobs.image_name)
+                "status":                overall_status,
+                # 전체 스캔 상태입니다. (DB CHECK: completed/failed 등)
                 "grype_status":          grype_status,
-                # Grype 스캔 상태입니다.
+                # Grype 스캔 상태입니다. (DB CHECK: completed/failed 등)
                 "trivy_status":          trivy_status,
-                # Trivy 스캔 상태입니다.
+                # Trivy 스캔 상태입니다. (DB CHECK: completed/failed 등)
                 "started_at":            started_at,
                 # 스캔 시작 시각입니다.
                 "finished_at":           finished_at,
@@ -630,8 +666,10 @@ async def custom_scan_endpoint(
                 # 스캔 이름입니다.
                 "file_name":     file.filename,
                 # 파일명입니다.
+                "file_type":     "image_tar",
+                # 파일 유형입니다. (scan_jobs.file_type, NOT NULL)
                 "status":        "failed",
-                # 스캔 상태를 실패로 표시합니다.
+                # 스캔 상태를 실패로 표시합니다. (DB CHECK 제약: failed 허용)
                 "error_message": str(e)[:500],
                 # 에러 메시지입니다 (처음 500자).
                 "started_at":    started_at,
@@ -720,7 +758,6 @@ def build_scan_report(
     """
     filtered_data 의 grype_vulnerabilities / trivy_vulnerabilities 전체 리스트를
     직접 사용하여 scan_reports 테이블에 저장할 통계를 계산합니다.
-    (기존: vulnerabilities 합본을 source로 분류 → mismatch 항목이 grype 쪽으로 편향되는 버그가 있어 수정)
     """
 
     # 도구별 { vulnerability_id → severity } 매핑을 전체 리스트에서 직접 구성
@@ -731,25 +768,25 @@ def build_scan_report(
 
     for v in filtered_data.get("grype_vulnerabilities", []):
         # Grype 전체 취약점 리스트를 순회합니다.
-        vid = (v.get("vulnerabilityid") or "").strip().upper()
-        # 취약점 ID를 대문자로 정규화합니다.
+        vid = (v.get("vulnerability_id") or "").strip().upper()
+        # 취약점 ID를 대문자로 정규화합니다. (DB 컬럼명: vulnerability_id)
         if not vid:
             # 취약점 ID가 없으면 건너뜁니다.
             continue
-        sev = (v.get("severity") or "UNKNOWN").upper()
-        # 심각도를 대문자로 정규화합니다.
+        sev = normalize_severity(v.get("severity"))
+        # 심각도를 5개 표준값으로 정규화합니다.
         grype_map.setdefault(vid, sev)
         # 중복은 무시하고 첫 등장만 기록합니다.
 
     for v in filtered_data.get("trivy_vulnerabilities", []):
         # Trivy 전체 취약점 리스트를 순회합니다.
-        vid = (v.get("vulnerabilityid") or "").strip().upper()
-        # 취약점 ID를 대문자로 정규화합니다.
+        vid = (v.get("vulnerability_id") or "").strip().upper()
+        # 취약점 ID를 대문자로 정규화합니다. (DB 컬럼명: vulnerability_id)
         if not vid:
             # 취약점 ID가 없으면 건너뜁니다.
             continue
-        sev = (v.get("severity") or "UNKNOWN").upper()
-        # 심각도를 대문자로 정규화합니다.
+        sev = normalize_severity(v.get("severity"))
+        # 심각도를 5개 표준값으로 정규화합니다.
         trivy_map.setdefault(vid, sev)
         # 중복은 무시하고 첫 등장만 기록합니다.
 
@@ -843,39 +880,38 @@ def count_by_severity(filtered_data: dict) -> dict:
     # Grype only 취약점 심각도 집계
     for v in filtered_data.get("grype_only", []):
         # Grype only 취약점에 대해 반복합니다.
-        sev = (v.get("severity") or "UNKNOWN").upper()
-        # 심각도를 대문자로 정규화합니다.
+        sev = normalize_severity(v.get("severity"))
+        # 심각도를 5개 표준값으로 정규화합니다.
         _bump("grype_only", sev)
         # grype_only 분류로 카운트합니다.
 
     # Trivy only 취약점 심각도 집계
     for v in filtered_data.get("trivy_only", []):
         # Trivy only 취약점에 대해 반복합니다.
-        sev = (v.get("severity") or "UNKNOWN").upper()
-        # 심각도를 대문자로 정규화합니다.
+        sev = normalize_severity(v.get("severity"))
+        # 심각도를 5개 표준값으로 정규화합니다.
         _bump("trivy_only", sev)
         # trivy_only 분류로 카운트합니다.
 
     # Mismatch 취약점 심각도 집계 (Grype 기준 심각도 사용)
     for v in filtered_data.get("mismatch", []):
         # Mismatch 취약점에 대해 반복합니다.
-        sev = (v.get("severity") or "UNKNOWN").upper()
-        # 심각도를 대문자로 정규화합니다.
+        sev = normalize_severity(v.get("severity"))
+        # 심각도를 5개 표준값으로 정규화합니다.
         _bump("mismatch", sev)
         # mismatch 분류로 카운트합니다.
 
     # Common matched (두 도구가 동일 심각도로 일치 탐지) 집계
-    # → grype_vulnerabilities ∩ trivy_vulnerabilities 중 심각도가 같은 항목
     grype_sev_map = {
-        (v.get("vulnerabilityid") or "").strip().upper(): (v.get("severity") or "UNKNOWN").upper()
+        (v.get("vulnerability_id") or "").strip().upper(): normalize_severity(v.get("severity"))
         for v in filtered_data.get("grype_vulnerabilities", [])
-        if v.get("vulnerabilityid")
+        if v.get("vulnerability_id")
     }
     # Grype 취약점의 ID→심각도 맵을 만듭니다.
     trivy_sev_map = {
-        (v.get("vulnerabilityid") or "").strip().upper(): (v.get("severity") or "UNKNOWN").upper()
+        (v.get("vulnerability_id") or "").strip().upper(): normalize_severity(v.get("severity"))
         for v in filtered_data.get("trivy_vulnerabilities", [])
-        if v.get("vulnerabilityid")
+        if v.get("vulnerability_id")
     }
     # Trivy 취약점의 ID→심각도 맵을 만듭니다.
 
@@ -926,7 +962,15 @@ def filter_results(grype_data: dict, trivy_data: dict) -> dict:
 
         vuln_id = vuln.get("id")
         # 취약점 ID를 추출합니다.
-        
+        pkg_name = art.get("name")
+        # 패키지명을 추출합니다.
+
+        # NOT NULL 필수 필드(vulnerability_id, package_name) 검증 - 없으면 skip
+        if not vuln_id or not pkg_name:
+            # 필수 필드가 없으면
+            continue
+            # 다음 매칭으로 진행합니다. (DB INSERT 실패 방지)
+
         cvss     = vuln.get("cvss", [])
         # CVSS 점수 정보를 추출합니다.
         risk     = cvss[0].get("metrics", {}).get("baseScore", "N/A") if cvss else "N/A"
@@ -939,36 +983,43 @@ def filter_results(grype_data: dict, trivy_data: dict) -> dict:
         # 수정 정보를 추출합니다.
         fix_state = fix_info.get("state", "not-fixed")
         # 수정 상태를 추출합니다.
+        # 빈 문자열은 None 으로 변환 (DB 의 is_fixed_available 자동 계산 호환)
+        fix_version_str = ", ".join(fix_info.get("versions", []))
+        # 수정 버전을 콤마로 연결합니다.
+        if not fix_version_str.strip():
+            # 빈 문자열이면
+            fix_version_str = None
+            # None 으로 변환합니다.
 
         grype_vulns[vuln_id] = {
-            # Grype 취약점 정보를 저장합니다.
+            # Grype 취약점 정보를 저장합니다. (DB 컬럼명에 맞게 키 변경)
             "source":                  "grype",
             # 도구 출처를 grype으로 표시합니다.
-            "vulnerabilityid":         vuln_id,
-            # 취약점 ID입니다.
-            "dataSource":              vuln.get("dataSource"),
-            # 데이터 출처입니다.
+            "vulnerability_id":        vuln_id,
+            # 취약점 ID입니다. (DB 컬럼: grype_filtered.vulnerability_id)
+            "data_source":             vuln.get("dataSource"),
+            # 데이터 출처입니다. (DB 컬럼: grype_filtered.data_source)
             "description":             vuln.get("description"),
             # 취약점 설명입니다.
-            "fix_version":             ", ".join(fix_info.get("versions", [])),
-            # 수정된 버전들입니다.
+            "fix_version":             fix_version_str,
+            # 수정된 버전들입니다. (빈 문자열 → None)
             "state":                   fix_state,
             # 수정 상태입니다.
             "is_fixed_available":      fix_state == "fixed",
             # 수정이 가능한지 여부입니다.
-            "artifactid":              art.get("id"),
-            # 아티팩트 ID입니다.
-            "package_name":            art.get("name"),
+            "artifact_id":             art.get("id"),
+            # 아티팩트 ID입니다. (DB 컬럼: grype_filtered.artifact_id)
+            "package_name":            pkg_name,
             # 패키지 이름입니다.
             "package_type":            art.get("type"),
             # 패키지 유형입니다.
             "install_path":            art.get("locations", [{}])[0].get("realPath")
                                        if art.get("locations") else None,
             # 설치 경로입니다.
-            "severity":                (vuln.get("severity") or "UNKNOWN").upper(),
-            # 심각도입니다. (대소문자 정규화 → DB 일관성)
-            "risk_score":              risk,
-            # 위험 점수입니다.
+            "severity":                normalize_severity(vuln.get("severity")),
+            # 심각도입니다. (DB CHECK 제약: 5개 표준값으로 정규화)
+            "risk":                    risk,
+            # 위험 점수입니다. (DB 컬럼: grype_filtered.risk)
             "version":                 art.get("version"),
             # 패키지 버전입니다.
             "related_vulnerability_id": related_id,
@@ -991,11 +1042,25 @@ def filter_results(grype_data: dict, trivy_data: dict) -> dict:
                 # 각 취약점에 대해 반복합니다.
                 vuln_id = v.get("VulnerabilityID")
                 # 취약점 ID를 추출합니다.
+                pkg_name = v.get("PkgName")
+                # 패키지명을 추출합니다.
+
+                # NOT NULL 필수 필드(vulnerability_id, package_name) 검증 - 없으면 skip
+                if not vuln_id or not pkg_name:
+                    # 필수 필드가 없으면
+                    continue
+                    # 다음 취약점으로 진행합니다. (DB INSERT 실패 방지)
+
                 fixed_ver = v.get("FixedVersion")
                 # 수정된 버전을 추출합니다.
+                # 빈 문자열은 None 으로 변환 (DB 의 is_fixed_available 자동 계산 호환)
+                if fixed_ver is not None and not str(fixed_ver).strip():
+                    # 빈 문자열이면
+                    fixed_ver = None
+                    # None 으로 변환합니다.
                 
                 trivy_vulns[vuln_id] = {
-                    # Trivy 취약점 정보를 저장합니다.
+                    # Trivy 취약점 정보를 저장합니다. (DB 컬럼명에 맞게 키 변경)
                     "source":            "trivy",
                     # 도구 출처를 trivy로 표시합니다.
                     "target":            target,
@@ -1004,9 +1069,9 @@ def filter_results(grype_data: dict, trivy_data: dict) -> dict:
                     # 결과 클래스입니다.
                     "result_type":       res_type,
                     # 결과 타입입니다.
-                    "vulnerabilityid":   vuln_id,
-                    # 취약점 ID입니다.
-                    "package_name":      v.get("PkgName"),
+                    "vulnerability_id":  vuln_id,
+                    # 취약점 ID입니다. (DB 컬럼: application_filtered.vulnerability_id)
+                    "package_name":      pkg_name,
                     # 패키지 이름입니다.
                     "package_path":      v.get("PkgPath"),
                     # 패키지 경로입니다.
@@ -1016,8 +1081,8 @@ def filter_results(grype_data: dict, trivy_data: dict) -> dict:
                     # 수정된 버전입니다.
                     "is_fixed_available": bool(fixed_ver),
                     # 수정이 가능한지 여부입니다.
-                    "severity":          (v.get("Severity") or "UNKNOWN").upper(),
-                    # 심각도입니다. (대소문자 정규화)
+                    "severity":          normalize_severity(v.get("Severity")),
+                    # 심각도입니다. (DB CHECK 제약: 5개 표준값으로 정규화)
                     "primary_url":       v.get("PrimaryURL"),
                     # 주요 URL입니다.
                     "title":             v.get("Title"),
@@ -1028,14 +1093,22 @@ def filter_results(grype_data: dict, trivy_data: dict) -> dict:
 
             for s in result.get("Secrets", []):
                 # 각 시크릿에 대해 반복합니다.
+                rule_id = s.get("RuleID")
+                # 규칙 ID를 추출합니다.
+                # NOT NULL 필수 필드(rule_id) 검증 - 없으면 skip
+                if not rule_id:
+                    # rule_id 가 없으면
+                    continue
+                    # 다음 시크릿으로 진행합니다. (DB INSERT 실패 방지)
+
                 processed["secrets"].append({
                     # 시크릿 정보를 추가합니다.
                     "title":        s.get("Title"),
-                    # 시크릿 제목입니다.
-                    "rule_id":      s.get("RuleID"),
+                    # 시크릿 제목입니다. (참고: DB 에 title 컬럼은 없으나 백엔드 참고용으로 보존)
+                    "rule_id":      rule_id,
                     # 규칙 ID입니다.
-                    "severity":     s.get("Severity"),
-                    # 심각도입니다.
+                    "severity":     normalize_severity(s.get("Severity")),
+                    # 심각도입니다. (5개 표준값으로 정규화)
                     "match_text":   s.get("Match"),
                     # 매칭된 텍스트입니다.
                     "category":     s.get("Category"),
@@ -1076,10 +1149,10 @@ def filter_results(grype_data: dict, trivy_data: dict) -> dict:
     # Mismatch 취약점 추가 (심각도가 다른 경우)
     for vuln_id in common_ids:
         # 공통으로 찾은 각 취약점에 대해 반복합니다.
-        grype_sev = grype_vulns[vuln_id].get("severity", "UNKNOWN").upper()
-        # Grype의 심각도를 추출합니다.
-        trivy_sev = trivy_vulns[vuln_id].get("severity", "UNKNOWN").upper()
-        # Trivy의 심각도를 추출합니다.
+        grype_sev = grype_vulns[vuln_id].get("severity", "UNKNOWN")
+        # Grype의 심각도를 추출합니다. (이미 normalize_severity 통과)
+        trivy_sev = trivy_vulns[vuln_id].get("severity", "UNKNOWN")
+        # Trivy의 심각도를 추출합니다. (이미 normalize_severity 통과)
         
         if grype_sev != trivy_sev:
             # 심각도가 다르면
