@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Supabase Login</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700&family=Noto+Sans+KR:wght@400;500;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="auth-card">
+        <div class="brand">
+          <p class="eyebrow">D.S.P</p>
+          <h1>환영합니다.</h1>
+          <p class="subtitle">간단한 이메일 로그인으로 시작해보세요.</p>
+        </div>
+
+        <form id="auth-form" class="form">
+          <label for="email">이메일</label>
+          <input id="email" type="email" placeholder="you@example.com" required />
+
+          <label for="password">비밀번호</label>
+          <input id="password" type="password" placeholder="최소 6자" required minlength="6" />
+
+          <div id="signup-extra" class="signup-extra hidden">
+            <p class="extra-title">회원가입 추가정보</p>
+            <p class="extra-subtitle">회원가입 버튼을 누를 때만 사용됩니다.</p>
+
+            <label for="signup-login-id">로그인 ID</label>
+            <input
+              id="signup-login-id"
+              type="text"
+              placeholder="영문 소문자/숫자/_ 4~20자"
+              autocomplete="username"
+            />
+
+            <label for="signup-full-name">이름</label>
+            <input id="signup-full-name" type="text" placeholder="홍길동" autocomplete="name" />
+
+            <label for="signup-phone">전화번호</label>
+            <input
+              id="signup-phone"
+              type="tel"
+              inputmode="numeric"
+              placeholder="01012341234"
+              autocomplete="tel"
+            />
+
+            <label for="signup-birth-date">생년월일</label>
+            <input id="signup-birth-date" type="date" />
+
+            <button type="button" id="cancel-signup-btn" class="text-btn back-btn">
+              로그인 화면으로
+            </button>
+          </div>
+
+          <div class="actions">
+            <button type="button" id="login-btn" class="primary">로그인</button>
+            <button type="button" id="signup-btn" class="ghost">회원가입</button>
+          </div>
+        </form>
+
+        <div class="find-links">
+          <button type="button" id="open-id-find" class="text-btn">ID 찾기</button>
+          <span class="sep">|</span>
+          <button type="button" id="open-pw-find" class="text-btn">P/W 찾기</button>
+        </div>
+
+        <p id="message" class="message" aria-live="polite"></p>
+
+        <section id="id-find-panel" class="recovery-panel hidden">
+          <h2>ID 찾기</h2>
+          <p class="panel-subtitle">가입 시 입력한 이름, 전화번호, 생년월일로 찾습니다.</p>
+          <div class="panel-form">
+            <label for="id-find-name">이름</label>
+            <input id="id-find-name" type="text" placeholder="홍길동" />
+
+            <label for="id-find-phone">전화번호</label>
+            <input id="id-find-phone" type="tel" inputmode="numeric" placeholder="01012341234" />
+
+            <label for="id-find-birth">생년월일</label>
+            <input id="id-find-birth" type="date" />
+
+            <button type="button" id="id-find-btn" class="ghost">ID 찾기 실행</button>
+            <p id="id-find-result" class="inline-message" aria-live="polite"></p>
+          </div>
+        </section>
+
+        <section id="pw-find-panel" class="recovery-panel hidden">
+          <h2>P/W 찾기</h2>
+          <p class="panel-subtitle">
+            정보 확인 후 이메일로 비밀번호 재설정 링크를 보냅니다.
+          </p>
+          <div class="panel-form">
+            <label for="pw-find-login-id">로그인 ID</label>
+            <input id="pw-find-login-id" type="text" placeholder="가입한 로그인 ID" />
+
+            <label for="pw-find-phone">전화번호</label>
+            <input id="pw-find-phone" type="tel" inputmode="numeric" placeholder="01012341234" />
+
+            <label for="pw-find-birth">생년월일</label>
+            <input id="pw-find-birth" type="date" />
+
+            <label for="pw-find-email">가입 이메일</label>
+            <input id="pw-find-email" type="email" placeholder="you@example.com" />
+
+            <button type="button" id="pw-find-btn" class="ghost">재설정 메일 보내기</button>
+            <p id="pw-find-result" class="inline-message" aria-live="polite"></p>
+          </div>
+        </section>
+
+      </section>
+    </main>
+
+    <script type="module" src="./app.js?v=20260528"></script>
+  </body>
+</html>
