@@ -298,7 +298,8 @@ dmc.Grid(gutter="md", children=[
                 dcc.Store(id="current-vuln-id", data=None),
                 dcc.Store(id="sort-state", data={"column": "id", "ascending": True}),
                 dcc.Store(id="scan-status-store", data="idle"),
-                dcc.Store(id="pdf-url-store"),                          
+                dcc.Store(id="pdf-url-store"),
+                dcc.Store(id="auth-token-store"),
                 html.Div(id="_logout-dummy", style={"display": "none"}),
                 html.Div(id="_pdf-trigger-dummy", style={"display": "none"}),  
 
@@ -362,12 +363,14 @@ def trigger_scan_log(n_clicks, contents, filename, current_logs):
     State("upload-data", "contents"),
     State("upload-data", "filename"),
     State("upload-log-store", "data"),
+    State("auth-token-store", "data"),
     prevent_initial_call=True
 )
-def perform_scan(status, contents, filename, current_logs):
+def perform_scan(status, contents, filename, current_logs, auth_token):
     if status != "trigger" or not contents:
         return no_update, no_update, no_update, no_update, no_update
 
+    headers = {"Authorization": f"Bearer {auth_token}"} if auth_token else {}
     logs = current_logs or []
     try:
         content_type, content_string = contents.split(',')
@@ -377,6 +380,7 @@ def perform_scan(status, contents, filename, current_logs):
             "http://127.0.0.1:8000/scan",
             files={'file': (filename, io.BytesIO(decoded), 'application/x-tar')},
             data={'user_id': 'admin'},
+            headers=headers,
             timeout=1800
         )
 
@@ -388,7 +392,7 @@ def perform_scan(status, contents, filename, current_logs):
             final_data = scan_data
             if job_id:
                 try:
-                    db_resp = requests.get(f"http://127.0.0.1:3000/results/{job_id}", timeout=60)
+                    db_resp = requests.get(f"http://127.0.0.1:3000/results/{job_id}", headers=headers, timeout=60)
                     if db_resp.status_code == 200:
                         final_data = db_resp.json()
                         vuln_cnt = len(final_data.get("vulnerabilities", []))
@@ -753,13 +757,13 @@ app.clientside_callback(
         for (const k of keys) {
             try {
                 const v = JSON.parse(window.localStorage.getItem(k));
-                if (v && v.user && v.user.email) return '👤 ' + v.user.email;
+                if (v && v.access_token) return v.access_token;
             } catch (e) {}
         }
-        return '';
+        return null;
     }
     """,
-    Output("user-email-display", "children"),
+    Output("auth-token-store", "data"),
     Input("url", "pathname")
 )
 
@@ -790,9 +794,10 @@ app.clientside_callback(
     Input("btn-export-pdf", "n_clicks"),
     State("analysis-result-store", "data"),
     State("upload-log-store", "data"),
+    State("auth-token-store", "data"),
     prevent_initial_call=True
 )
-def request_pdf(n_clicks, analysis, current_logs):
+def request_pdf(n_clicks, analysis, current_logs, auth_token):
     def _ts():
         return datetime.datetime.now().strftime("%H:%M:%S")
     if not n_clicks:
@@ -803,10 +808,12 @@ def request_pdf(n_clicks, analysis, current_logs):
         return no_update, logs
     job_id = analysis["job_id"]
     logs.insert(0, {"time": _ts(), "content": f"PDF 추출 요청 중 (job {job_id[:8]}...)"})
+    headers = {"Authorization": f"Bearer {auth_token}"} if auth_token else {}
     try:
         resp = requests.post(
             "http://127.0.0.1:3000/pdf",
             json={"job_id": job_id},
+            headers=headers,
             timeout=300,
         )
         data = resp.json()
