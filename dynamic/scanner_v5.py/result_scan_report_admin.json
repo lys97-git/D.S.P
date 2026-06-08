@@ -1,0 +1,14 @@
+{
+    "id": "717d7da3-9410-4a97-a3da-e5b011482173",
+    "user_id": "admin",
+    "scan_job_id": null,
+    "scan_jobs_id": null,
+    "image_tag": "vulnerable_alpine_3.9.tar",
+    "total_count": 63,
+    "common_count": 7,
+    "grype_only": 56,
+    "trivy_only": 0,
+    "mismatch_count": 0,
+    "report_path": null,
+    "created_at": "2026-06-08T03:21:34.527092+00:00"
+}
